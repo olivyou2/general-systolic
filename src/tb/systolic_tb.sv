@@ -17,6 +17,7 @@ module systolic_tb();
     logic sig_flow_h    = 0;
     logic sig_drain     = 0;
     logic sig_broad_h   = 0;
+    logic sig_broad_v   = 0;
 
     systolic#(
         .WIDTH(SYSTOLIC_WIDTH),
@@ -34,7 +35,8 @@ module systolic_tb();
         .flow_v(sig_flow_v),
         .flow_h(sig_flow_h),
         .drain(sig_drain),
-        .broad_h(sig_broad_h)
+        .broad_h(sig_broad_h),
+        .broad_v(sig_broad_v)
     );
 
     task automatic tick();

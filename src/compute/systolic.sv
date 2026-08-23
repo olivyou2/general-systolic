@@ -16,6 +16,7 @@ module systolic#(
     input logic flow_h,     // <- Flow Horizontal Flow
     input logic drain,      // <- Drain Result Signal
 
+    input logic broad_v,     // <- Broadcast Vertical Activations
     input logic broad_h     // <- Broadcast Horizontal Activations
 );
     logic [15:0] result[WIDTH][HEIGHT];
@@ -54,11 +55,19 @@ module systolic#(
                 end
 
                 if (flow_v) begin
-                    for (int i=0; i<WIDTH; i++) begin
-                        vertical_flow[i][0] <= horizontal_bar[i];
+                    if (!broad_v) begin
+                        for (int i=0; i<WIDTH; i++) begin
+                            vertical_flow[i][0] <= horizontal_bar[i];
 
-                        for (int j=1; j<HEIGHT; j++) begin
-                            vertical_flow[i][j] <= vertical_flow[i][j-1];
+                            for (int j=1; j<HEIGHT; j++) begin
+                                vertical_flow[i][j] <= vertical_flow[i][j-1];
+                            end
+                        end
+                    end else begin
+                        for (int i=0; i<WIDTH; i++) begin
+                            for (int j=0; j<HEIGHT; j++) begin
+                                vertical_flow[i][j] <= horizontal_bar[i];
+                            end
                         end
                     end
                 end
