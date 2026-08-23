@@ -24,14 +24,14 @@ module systolic#(
     logic [7:0] horizontal_flow[WIDTH][HEIGHT]; // x ++
     logic [7:0] vertical_flow[WIDTH][HEIGHT]; // y ++
 
-    genvar ii;
-
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (int i=0; i<WIDTH; i++) begin
                 horizontal_drain_bar[i] <= 0;
                 for (int j=0; j<HEIGHT; j++) begin
                     result[i][j] <= 0;
+                    horizontal_flow[i][j] <= 0;
+                    vertical_flow[i][j] <= 0;
                 end
             end
         end else begin
