@@ -180,8 +180,7 @@ module global_scratchpad #(
                     read_return_y,
                     OP_RESPONSE,
                     X_BITS'(X_COORD),
-                    Y_BITS'(Y_COORD),
-                    read_metadata
+                    Y_BITS'(Y_COORD), read_metadata
                 };
             end
         end
@@ -221,25 +220,20 @@ module global_scratchpad #(
                 end else begin
                     dma_transfer_index <= dma_transfer_index + 1'b1;
                     dma_source_current <= dma_source_current + 1'b1;
-                    dma_destination_current
-                        <= dma_destination_current + dma_stride_q;
+                    dma_destination_current <= dma_destination_current + dma_stride_q;
                 end
             end
 
             if (control_fire) begin
                 case (request_local_addr[31:0])
                     DMA_SOURCE_REG:
-                        dma_source_config
-                            <= mesh_data_in[0][MEM_ADDR_WIDTH-1:0];
+                        dma_source_config <= mesh_data_in[0][MEM_ADDR_WIDTH-1:0];
                     DMA_LENGTH_REG:
-                        dma_length_config
-                            <= mesh_data_in[0][LENGTH_WIDTH-1:0];
+                        dma_length_config <= mesh_data_in[0][LENGTH_WIDTH-1:0];
                     DMA_DESTINATION_REG:
-                        dma_destination_config
-                            <= mesh_data_in[0][ADDR_WIDTH-1:0];
+                        dma_destination_config <= mesh_data_in[0][ADDR_WIDTH-1:0];
                     DMA_STRIDE_REG:
-                        dma_stride_config
-                            <= mesh_data_in[0][ADDR_WIDTH-1:0];
+                        dma_stride_config <= mesh_data_in[0][ADDR_WIDTH-1:0];
                     DMA_COMMAND_REG: begin
                         dma_error <= 1'b0;
                         if (mesh_data_in[0][0]) begin
@@ -253,8 +247,7 @@ module global_scratchpad #(
                                 dma_source_current <= dma_source_config;
                                 dma_transfer_index <= '0;
                                 dma_length_q <= dma_length_config;
-                                dma_destination_current
-                                    <= dma_destination_config;
+                                dma_destination_current <= dma_destination_config;
                                 dma_stride_q <= dma_stride_config;
                                 dma_read_pending <= 1'b0;
                                 dma_output_valid <= 1'b0;

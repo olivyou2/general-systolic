@@ -544,7 +544,7 @@ module core #(
                 if (drain_request_valid) begin
                     drain_pending <= 1'b1;
                 end
-            end
+            end 
         end
     end
 
