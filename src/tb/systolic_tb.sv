@@ -11,6 +11,7 @@ module systolic_tb();
     logic [7:0] horizontal_bar  [SYSTOLIC_WIDTH];
 
     logic [7:0] drain_bar       [SYSTOLIC_WIDTH];
+    logic [15:0] drain_full     [SYSTOLIC_WIDTH];
 
     logic sig_add       = 0;
     logic sig_flow_v    = 0;
@@ -29,6 +30,7 @@ module systolic_tb();
         .vertical_bar(vertical_bar),
         .horizontal_bar(horizontal_bar),
         .horizontal_drain_bar(drain_bar),
+        .horizontal_drain_full(drain_full),
         .result_saturation(RESULT_SATURATION),
 
         .add(sig_add),

@@ -9,6 +9,7 @@ module systolic#(
     input logic [7:0] horizontal_bar[WIDTH],
 
     output logic [7:0] horizontal_drain_bar[WIDTH],
+    output logic [15:0] horizontal_drain_full[WIDTH],
     input logic [3:0] result_saturation,
 
     input logic add,        // <- Add Multiply Number to Result
@@ -28,6 +29,7 @@ module systolic#(
         if (!rst_n) begin
             for (int i=0; i<WIDTH; i++) begin
                 horizontal_drain_bar[i] <= 0;
+                horizontal_drain_full[i] <= 0;
                 for (int j=0; j<HEIGHT; j++) begin
                     result[i][j] <= 0;
                     horizontal_flow[i][j] <= 0;
@@ -40,6 +42,7 @@ module systolic#(
                 for (int i=0; i<WIDTH; i++) begin
                     result[i][0] <= 0;
                     horizontal_drain_bar[i] <= 8'(result[i][HEIGHT-1] >> result_saturation);
+                    horizontal_drain_full[i] <= result[i][HEIGHT-1] >> result_saturation;
 
                     for (int j=1; j<HEIGHT; j++) begin
                         result[i][j] <= result[i][j-1];
