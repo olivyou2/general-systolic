@@ -82,13 +82,31 @@ module systolic_launcher #(
     localparam logic [K_COUNTER_WIDTH-1:0] LAST_GEMM_K
         = K_COUNTER_WIDTH'(SYSTOLIC_WIDTH - 1);
 
-    logic [1:0] fsm_status;
+    logic [3:0] fsm_status;
     logic cnn_mode;
     logic [A_LANE_SEL_WIDTH-1:0] a_col_sel;
     logic [A_LANE_SEL_WIDTH-1:0] a_lane_sel [0:A_BANKS-1];
     logic [A_BANKS-1:0] a_zero_lane;
     logic [B_SEL_WIDTH-1:0] b_bank_sel;
     logic [K_COUNTER_WIDTH-1:0] k_counter;
+    logic [$clog2(A_BANKS)-1:0] setup_row;
+    logic [15:0] setup_output_x;
+    logic [15:0] setup_output_y;
+
+    // CNN addresses are generated incrementally.  The old implementation
+    // expanded variable multiply/divide/modulo expressions three times per
+    // bank in the RUN state.  These registered setup values remove that long
+    // combinational path while preserving one K step per clock once primed.
+    logic signed [31:0] row_input_x [0:A_BANKS-1];
+    logic signed [31:0] row_input_y [0:A_BANKS-1];
+    logic row_output_valid [0:A_BANKS-1];
+    logic signed [47:0] spatial_index [0:A_BANKS-1];
+    logic signed [47:0] channel_offset;
+    logic signed [47:0] image_plane;
+    logic cnn_geometry_valid;
+    logic [15:0] cnn_channel_counter;
+    logic [7:0] cnn_kernel_x_counter;
+    logic [7:0] cnn_kernel_y_counter;
 
     assign busy = (fsm_status != 0);
     assign systolic_flow_v_signal = busy;
@@ -96,119 +114,13 @@ module systolic_launcher #(
     assign systolic_broad_v_signal = 1'b1;
     assign systolic_broad_h_signal = 1'b1;
 
-    // Return the CHW element selected by an im2col row and K index.  A bank
-    // stores a complete logical input image; all eight banks are populated by
-    // the CNN input loader so the eight output positions can be read in
-    // parallel from independent BRAMs.
-    /* verilator lint_off WIDTHEXPAND */
-    function automatic integer cnn_input_element(
-        input integer row,
-        input integer k
+    function automatic logic cnn_coordinate_valid(
+        input logic signed [31:0] x,
+        input logic signed [31:0] y
     );
-        integer output_linear;
-        integer output_x;
-        integer output_y;
-        integer kernel_linear;
-        integer kernel_x;
-        integer kernel_y;
-        integer channel;
-        integer input_x;
-        integer input_y;
-        integer output_width_calc;
-        integer output_height_calc;
-        begin
-            cnn_input_element = -1;
-            if ((cnn_output_width != 0)
-                && (cnn_input_width != 0)
-                && (cnn_input_height != 0)
-                && (cnn_input_channels != 0)
-                && (cnn_kernel_width != 0)
-                && (cnn_kernel_height != 0)) begin
-                output_linear = cnn_output_y * cnn_output_width
-                                + cnn_output_x + row;
-                output_y = output_linear / cnn_output_width;
-                output_x = output_linear % cnn_output_width;
-                output_width_calc = 0;
-                output_height_calc = 0;
-                if ((cnn_stride_x != 0) && (cnn_stride_y != 0)
-                    && (cnn_input_width + cnn_pad_left + cnn_pad_right
-                        >= cnn_kernel_width)
-                    && (cnn_input_height + cnn_pad_top + cnn_pad_bottom
-                        >= cnn_kernel_height)) begin
-                    output_width_calc
-                        = (cnn_input_width + cnn_pad_left + cnn_pad_right
-                           - cnn_kernel_width) / cnn_stride_x + 1;
-                    output_height_calc
-                        = (cnn_input_height + cnn_pad_top + cnn_pad_bottom
-                           - cnn_kernel_height) / cnn_stride_y + 1;
-                end
-                channel = k % cnn_input_channels;
-                kernel_linear = k / cnn_input_channels;
-                kernel_x = kernel_linear % cnn_kernel_width;
-                kernel_y = kernel_linear / cnn_kernel_width;
-                input_x = output_x * cnn_stride_x + kernel_x
-                          - cnn_pad_left;
-                input_y = output_y * cnn_stride_y + kernel_y
-                          - cnn_pad_top;
-
-                if ((k < 0)
-                    || (k >= cnn_k_total)
-                    || (kernel_y >= cnn_kernel_height)
-                    || (output_width_calc == 0)
-                    || (output_height_calc == 0)
-                    || (output_linear >= output_width_calc * output_height_calc)
-                    || (input_x < 0) || (input_x >= cnn_input_width)
-                    || (input_y < 0) || (input_y >= cnn_input_height)) begin
-                    cnn_input_element = -1;
-                end else begin
-                    cnn_input_element
-                        = (channel * cnn_input_height + input_y)
-                          * cnn_input_width + input_x;
-                end
-            end
-        end
+        cnn_coordinate_valid = (x >= 0) && (x < $signed({1'b0, cnn_input_width}))
+                               && (y >= 0) && (y < $signed({1'b0, cnn_input_height}));
     endfunction
-
-    function automatic [A_ADDRWIDTH-1:0] cnn_a_address(
-        input integer row,
-        input integer k
-    );
-        integer element;
-        begin
-            element = cnn_input_element(row, k);
-            if (element < 0) begin
-                cnn_a_address = '0;
-            end else begin
-                cnn_a_address = cnn_input_base
-                    + A_ADDRWIDTH'(element / A_LANE_COUNT);
-            end
-        end
-    endfunction
-
-    function automatic [A_LANE_SEL_WIDTH-1:0] cnn_a_lane(
-        input integer row,
-        input integer k
-    );
-        integer element;
-        begin
-            element = cnn_input_element(row, k);
-            if (element < 0) begin
-                cnn_a_lane = '0;
-            end else begin
-                cnn_a_lane = A_LANE_SEL_WIDTH'(element % A_LANE_COUNT);
-            end
-        end
-    endfunction
-
-    function automatic logic cnn_a_zero(
-        input integer row,
-        input integer k
-    );
-        begin
-            cnn_a_zero = (cnn_input_element(row, k) < 0);
-        end
-    endfunction
-    /* verilator lint_on WIDTHEXPAND */
 
     generate
         for (genvar y = 0; y < SYSTOLIC_HEIGHT; y++) begin : vertical_lanes
@@ -251,11 +163,24 @@ module systolic_launcher #(
             a_col_sel <= '0;
             b_bank_sel <= '0;
             k_counter <= '0;
+            setup_row <= '0;
+            setup_output_x <= '0;
+            setup_output_y <= '0;
+            channel_offset <= '0;
+            image_plane <= '0;
+            cnn_geometry_valid <= 1'b0;
+            cnn_channel_counter <= '0;
+            cnn_kernel_x_counter <= '0;
+            cnn_kernel_y_counter <= '0;
             systolic_add_signal <= 1'b0;
             a_zero_lane <= '0;
             for (int i = 0; i < A_BANKS; i++) begin
                 a_addr[i] <= '0;
                 a_lane_sel[i] <= '0;
+                row_input_x[i] <= '0;
+                row_input_y[i] <= '0;
+                row_output_valid[i] <= 1'b0;
+                spatial_index[i] <= '0;
             end
             for (int i = 0; i < B_BANKS; i++) begin
                 b_addr[i] <= '0;
@@ -280,23 +205,15 @@ module systolic_launcher #(
                         end
                     end else if (cnn_fire && (cnn_k_total != 0)) begin
                         cnn_mode <= 1'b1;
-                        fsm_status <= 1;
+                        // Set up one output row per cycle.  This turns output
+                        // row wrapping into a compare/increment rather than a
+                        // variable divide and modulo operation.
+                        fsm_status <= 8;
                         k_counter <= '0;
                         b_bank_sel <= '0;
-                        for (int i = 0; i < A_BANKS; i++) begin
-                            if (i < SYSTOLIC_HEIGHT) begin
-                                a_addr[i] <= cnn_a_address(i, 0);
-                                a_lane_sel[i] <= cnn_a_lane(i, 0);
-                                a_zero_lane[i] <= cnn_a_zero(i, 0);
-                            end else begin
-                                a_addr[i] <= '0;
-                                a_lane_sel[i] <= '0;
-                                a_zero_lane[i] <= 1'b1;
-                            end
-                        end
-                        for (int i = 0; i < B_BANKS; i++) begin
-                            b_addr[i] <= cnn_weight_base;
-                        end
+                        setup_row <= '0;
+                        setup_output_x <= cnn_output_x;
+                        setup_output_y <= cnn_output_y;
                     end
                 end
 
@@ -304,17 +221,6 @@ module systolic_launcher #(
                 // the BRAM still sees k=0; pre-issue k=1 so its response is
                 // available for the second MAC step.
                 1: begin
-                    if (cnn_mode && (cnn_k_total > 1)) begin
-                        for (int i = 0; i < A_BANKS; i++) begin
-                            if (i < SYSTOLIC_HEIGHT) begin
-                                a_addr[i] <= cnn_a_address(i, 1);
-                            end
-                        end
-                        for (int i = 0; i < B_BANKS; i++) begin
-                            b_addr[i] <= cnn_weight_base
-                                + B_ADDRWIDTH'(1 / B_BANKS);
-                        end
-                    end
                     fsm_status <= 2;
                 end
 
@@ -327,25 +233,76 @@ module systolic_launcher #(
                             fsm_status <= 3;
                         end else begin
                             k_counter <= k_counter + 1'b1;
-                            b_bank_sel <= B_SEL_WIDTH'((int'(k_counter) + 1)
+                            b_bank_sel <= B_SEL_WIDTH'((k_counter + 1'b1)
                                                        % B_BANKS);
                             for (int i = 0; i < A_BANKS; i++) begin
                                 if (i < SYSTOLIC_HEIGHT) begin
-                                    a_lane_sel[i]
-                                        <= cnn_a_lane(i, int'(k_counter) + 1);
-                                    a_zero_lane[i]
-                                        <= cnn_a_zero(i, int'(k_counter) + 1);
+                                    a_lane_sel[i] <= A_LANE_SEL_WIDTH'(
+                                        (spatial_index[i] + channel_offset)
+                                        % A_LANE_COUNT);
+                                    a_zero_lane[i] <= !cnn_coordinate_valid(
+                                        row_input_x[i], row_input_y[i])
+                                        || !row_output_valid[i];
                                     if ((k_counter + 2) < cnn_k_total) begin
-                                        a_addr[i] <= cnn_a_address(
-                                            i, int'(k_counter) + 2);
+                                        if ((cnn_channel_counter + 1'b1)
+                                            < cnn_input_channels) begin
+                                            a_addr[i] <= cnn_input_base
+                                                + A_ADDRWIDTH'((spatial_index[i]
+                                                    + channel_offset
+                                                    + image_plane)
+                                                    / A_LANE_COUNT);
+                                        end else if ((cnn_kernel_x_counter + 1'b1)
+                                                     < cnn_kernel_width) begin
+                                            a_addr[i] <= cnn_input_base
+                                                + A_ADDRWIDTH'((spatial_index[i] + 1)
+                                                    / A_LANE_COUNT);
+                                        end else begin
+                                            a_addr[i] <= cnn_input_base
+                                                + A_ADDRWIDTH'((spatial_index[i]
+                                                    + $signed({1'b0, cnn_input_width})
+                                                    - $signed({1'b0, cnn_kernel_width})
+                                                    + 1) / A_LANE_COUNT);
+                                        end
                                     end
                                 end
                             end
                             if ((k_counter + 2) < cnn_k_total) begin
                                 for (int i = 0; i < B_BANKS; i++) begin
                                     b_addr[i] <= cnn_weight_base
-                                        + B_ADDRWIDTH'((int'(k_counter) + 2)
+                                        + B_ADDRWIDTH'((k_counter + 2)
                                                        / B_BANKS);
+                                end
+                            end
+
+                            // Advance the compact CHW/kernel descriptor used
+                            // to form the following cycle's address.
+                            if ((cnn_channel_counter + 1'b1)
+                                < cnn_input_channels) begin
+                                cnn_channel_counter <= cnn_channel_counter + 1'b1;
+                                channel_offset <= channel_offset + image_plane;
+                            end else begin
+                                cnn_channel_counter <= '0;
+                                channel_offset <= '0;
+                                if ((cnn_kernel_x_counter + 1'b1)
+                                    < cnn_kernel_width) begin
+                                    cnn_kernel_x_counter
+                                        <= cnn_kernel_x_counter + 1'b1;
+                                    for (int i = 0; i < A_BANKS; i++) begin
+                                        row_input_x[i] <= row_input_x[i] + 1;
+                                        spatial_index[i] <= spatial_index[i] + 1;
+                                    end
+                                end else begin
+                                    cnn_kernel_x_counter <= '0;
+                                    cnn_kernel_y_counter
+                                        <= cnn_kernel_y_counter + 1'b1;
+                                    for (int i = 0; i < A_BANKS; i++) begin
+                                        row_input_x[i] <= row_input_x[i]
+                                            - $signed({1'b0, cnn_kernel_width}) + 1;
+                                        row_input_y[i] <= row_input_y[i] + 1;
+                                        spatial_index[i] <= spatial_index[i]
+                                            + $signed({1'b0, cnn_input_width})
+                                            - $signed({1'b0, cnn_kernel_width}) + 1;
+                                    end
                                 end
                             end
                         end
@@ -363,6 +320,137 @@ module systolic_launcher #(
                 3: begin
                     systolic_add_signal <= 1'b0;
                     fsm_status <= 0;
+                end
+
+                // CNN setup pipeline.  The launch latency grows by nineteen
+                // clocks, but the steady-state MAC rate remains one K step
+                // per clock and no divider is present in the RUN path.
+                4: begin
+                    row_input_x[setup_row] <=
+                        $signed({1'b0, setup_output_x})
+                        * $signed({1'b0, cnn_stride_x})
+                        - $signed({1'b0, cnn_pad_left});
+                    row_input_y[setup_row] <=
+                        $signed({1'b0, setup_output_y})
+                        * $signed({1'b0, cnn_stride_y})
+                        - $signed({1'b0, cnn_pad_top});
+                    fsm_status <= 9;
+                end
+
+                5: begin
+                    for (int i = 0; i < A_BANKS; i++) begin
+                        spatial_index[i] <= row_input_y[i]
+                            * $signed({1'b0, cnn_input_width}) + row_input_x[i];
+                    end
+                    fsm_status <= 6;
+                end
+
+                6: begin
+                    channel_offset <= '0;
+                    cnn_channel_counter <= '0;
+                    cnn_kernel_x_counter <= '0;
+                    cnn_kernel_y_counter <= '0;
+                    for (int i = 0; i < A_BANKS; i++) begin
+                        if (i < SYSTOLIC_HEIGHT) begin
+                            a_addr[i] <= cnn_input_base
+                                + A_ADDRWIDTH'(spatial_index[i] / A_LANE_COUNT);
+                            a_lane_sel[i] <= A_LANE_SEL_WIDTH'(
+                                spatial_index[i] % A_LANE_COUNT);
+                            a_zero_lane[i] <= !cnn_coordinate_valid(
+                                row_input_x[i], row_input_y[i])
+                                || !row_output_valid[i];
+                        end else begin
+                            a_addr[i] <= '0;
+                            a_lane_sel[i] <= '0;
+                            a_zero_lane[i] <= 1'b1;
+                        end
+                    end
+                    for (int i = 0; i < B_BANKS; i++) begin
+                        b_addr[i] <= cnn_weight_base;
+                    end
+                    fsm_status <= 7;
+                end
+
+                7: begin
+                    // Pre-issue k=1 while retaining the k=0 lane selection.
+                    if (cnn_k_total > 1) begin
+                        if (cnn_input_channels > 1) begin
+                            channel_offset <= image_plane;
+                            cnn_channel_counter <= 1;
+                            for (int i = 0; i < A_BANKS; i++) begin
+                                a_addr[i] <= cnn_input_base
+                                    + A_ADDRWIDTH'((spatial_index[i] + image_plane)
+                                                   / A_LANE_COUNT);
+                            end
+                        end else if (cnn_kernel_width > 1) begin
+                            cnn_kernel_x_counter <= 1;
+                            for (int i = 0; i < A_BANKS; i++) begin
+                                row_input_x[i] <= row_input_x[i] + 1;
+                                spatial_index[i] <= spatial_index[i] + 1;
+                                a_addr[i] <= cnn_input_base
+                                    + A_ADDRWIDTH'((spatial_index[i] + 1)
+                                                   / A_LANE_COUNT);
+                            end
+                        end else begin
+                            cnn_kernel_y_counter <= 1;
+                            for (int i = 0; i < A_BANKS; i++) begin
+                                row_input_y[i] <= row_input_y[i] + 1;
+                                spatial_index[i] <= spatial_index[i]
+                                    + $signed({1'b0, cnn_input_width});
+                                a_addr[i] <= cnn_input_base
+                                    + A_ADDRWIDTH'((spatial_index[i]
+                                        + $signed({1'b0, cnn_input_width}))
+                                        / A_LANE_COUNT);
+                            end
+                        end
+                    end
+                    fsm_status <= 2;
+                end
+
+                // Register geometry terms before the per-row multiply/compare
+                // stage.  Besides shortening the data path, this prevents
+                // synthesis from folding the kernel-size test into the row
+                // coordinate registers' clock enables.
+                8: begin
+                    image_plane <= $signed({1'b0, cnn_input_width})
+                                   * $signed({1'b0, cnn_input_height});
+                    cnn_geometry_valid <=
+                        (cnn_stride_x != 0) && (cnn_stride_y != 0)
+                        && (cnn_input_width != 0) && (cnn_input_height != 0)
+                        && (cnn_input_channels != 0)
+                        && (cnn_kernel_width != 0) && (cnn_kernel_height != 0)
+                        && ((cnn_input_width + cnn_pad_left + cnn_pad_right)
+                            >= cnn_kernel_width)
+                        && ((cnn_input_height + cnn_pad_top + cnn_pad_bottom)
+                            >= cnn_kernel_height);
+                    fsm_status <= 4;
+                end
+
+                // Validate the registered input origin in a separate cycle.
+                // This avoids a multiplier-plus-wide-compare path and leaves
+                // only add/compare logic between setup registers.
+                9: begin
+                    row_output_valid[setup_row] <= cnn_geometry_valid
+                        && ((row_input_x[setup_row]
+                             + $signed({1'b0, cnn_kernel_width}))
+                            <= ($signed({1'b0, cnn_input_width})
+                                + $signed({1'b0, cnn_pad_right})))
+                        && ((row_input_y[setup_row]
+                             + $signed({1'b0, cnn_kernel_height}))
+                            <= ($signed({1'b0, cnn_input_height})
+                                + $signed({1'b0, cnn_pad_bottom})));
+                    if (setup_row == A_BANKS-1) begin
+                        fsm_status <= 5;
+                    end else begin
+                        setup_row <= setup_row + 1'b1;
+                        if ((setup_output_x + 1'b1) >= cnn_output_width) begin
+                            setup_output_x <= '0;
+                            setup_output_y <= setup_output_y + 1'b1;
+                        end else begin
+                            setup_output_x <= setup_output_x + 1'b1;
+                        end
+                        fsm_status <= 4;
+                    end
                 end
 
                 default: begin
