@@ -15,6 +15,7 @@ module systolic#(
     input logic add,        // <- Add Multiply Number to Result
     input logic flow_v,     // <- Flow Vertical Flow
     input logic flow_h,     // <- Flow Horizontal Flow
+    input logic clear_accumulator,
     input logic drain,      // <- Drain Result Signal
 
     input logic broad_v,     // <- Broadcast Vertical Activations
@@ -38,7 +39,15 @@ module systolic#(
             end
         end else begin
 
-            if (drain) begin
+            if (clear_accumulator) begin
+                for (int i=0; i<WIDTH; i++) begin
+                    horizontal_drain_bar[i] <= 0;
+                    horizontal_drain_full[i] <= 0;
+                    for (int j=0; j<HEIGHT; j++) begin
+                        result[i][j] <= 0;
+                    end
+                end
+            end else if (drain) begin
                 for (int i=0; i<WIDTH; i++) begin
                     result[i][0] <= 0;
                     horizontal_drain_bar[i] <= 8'(result[i][HEIGHT-1] >> result_saturation);

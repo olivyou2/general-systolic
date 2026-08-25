@@ -44,6 +44,10 @@ module systolic_launcher #(
     input logic cnn_fire,
     output logic busy,
 
+    input logic [15:0] gemm_m_size,
+    input logic [15:0] gemm_n_size,
+    input logic [15:0] gemm_k_size,
+
     input logic [A_ADDRWIDTH-1:0] cnn_input_base,
     input logic [B_ADDRWIDTH-1:0] cnn_weight_base,
     input logic [15:0] cnn_input_width,
@@ -79,11 +83,11 @@ module systolic_launcher #(
         ? $clog2(A_LANE_COUNT) : 1;
     localparam int B_SEL_WIDTH = (B_BANKS > 1) ? $clog2(B_BANKS) : 1;
     localparam int K_COUNTER_WIDTH = 16;
-    localparam logic [K_COUNTER_WIDTH-1:0] LAST_GEMM_K
-        = K_COUNTER_WIDTH'(SYSTOLIC_WIDTH - 1);
-
     logic [3:0] fsm_status;
     logic cnn_mode;
+    logic [15:0] gemm_m_q;
+    logic [15:0] gemm_n_q;
+    logic [15:0] gemm_k_q;
     logic [A_LANE_SEL_WIDTH-1:0] a_col_sel;
     logic [A_LANE_SEL_WIDTH-1:0] a_lane_sel [0:A_BANKS-1];
     logic [A_BANKS-1:0] a_zero_lane;
@@ -132,6 +136,8 @@ module systolic_launcher #(
                         systolic_vertical_bar[y]
                             = a_data[y][a_lane_sel[y]*SYSTOLIC_UNITWIDTH
                                        +: SYSTOLIC_UNITWIDTH];
+                    end else if (16'(y) >= gemm_m_q) begin
+                        systolic_vertical_bar[y] = '0;
                     end else begin
                         systolic_vertical_bar[y]
                             = a_data[y][a_col_sel*SYSTOLIC_UNITWIDTH
@@ -146,9 +152,13 @@ module systolic_launcher #(
         for (genvar x = 0; x < SYSTOLIC_WIDTH; x++) begin : horizontal_lanes
             if (x < B_LANE_COUNT) begin : valid_lane
                 always_comb begin
-                    systolic_horizontal_bar[x]
-                        = b_data[b_bank_sel][x*SYSTOLIC_UNITWIDTH
-                                           +: SYSTOLIC_UNITWIDTH];
+                    if (!cnn_mode && (16'(x) >= gemm_n_q)) begin
+                        systolic_horizontal_bar[x] = '0;
+                    end else begin
+                        systolic_horizontal_bar[x]
+                            = b_data[b_bank_sel][x*SYSTOLIC_UNITWIDTH
+                                               +: SYSTOLIC_UNITWIDTH];
+                    end
                 end
             end else begin : missing_lane
                 always_comb systolic_horizontal_bar[x] = '0;
@@ -160,6 +170,9 @@ module systolic_launcher #(
         if (!rst_n) begin
             fsm_status <= 0;
             cnn_mode <= 1'b0;
+            gemm_m_q <= 16'(SYSTOLIC_HEIGHT);
+            gemm_n_q <= 16'(SYSTOLIC_WIDTH);
+            gemm_k_q <= 16'(SYSTOLIC_WIDTH);
             a_col_sel <= '0;
             b_bank_sel <= '0;
             k_counter <= '0;
@@ -191,6 +204,9 @@ module systolic_launcher #(
                     systolic_add_signal <= 1'b0;
                     if (fire) begin
                         cnn_mode <= 1'b0;
+                        gemm_m_q <= gemm_m_size;
+                        gemm_n_q <= gemm_n_size;
+                        gemm_k_q <= gemm_k_size;
                         fsm_status <= 1;
                         a_col_sel <= '0;
                         b_bank_sel <= '0;
@@ -221,6 +237,14 @@ module systolic_launcher #(
                 // the BRAM still sees k=0; pre-issue k=1 so its response is
                 // available for the second MAC step.
                 1: begin
+                    if (!cnn_mode && (gemm_k_q > 1)) begin
+                        for (int i = 0; i < A_BANKS; i++) begin
+                            a_addr[i] <= a_mat_base_offset;
+                        end
+                        for (int i = 0; i < B_BANKS; i++) begin
+                            b_addr[i] <= b_mat_base_offset;
+                        end
+                    end
                     fsm_status <= 2;
                 end
 
@@ -307,12 +331,31 @@ module systolic_launcher #(
                             end
                         end
                     end else begin
-                        a_col_sel <= a_col_sel + 1'b1;
-                        b_bank_sel <= b_bank_sel + 1'b1;
-                        if (k_counter == LAST_GEMM_K) begin
+                        if (k_counter == gemm_k_q - 1'b1) begin
                             fsm_status <= 3;
                         end else begin
                             k_counter <= k_counter + 1'b1;
+                            a_col_sel <= A_LANE_SEL_WIDTH'(
+                                (k_counter + 1'b1) % A_LANE_COUNT);
+                            b_bank_sel <= B_SEL_WIDTH'(
+                                (k_counter + 1'b1) % B_BANKS);
+
+                            // BRAM data is available one clock after an
+                            // address update. Pre-issue k+2 while k is being
+                            // consumed so lane/bank rollover at k=8,16,...
+                            // remains bubble-free.
+                            if ((k_counter + 2) < gemm_k_q) begin
+                                for (int i = 0; i < A_BANKS; i++) begin
+                                    a_addr[i] <= a_mat_base_offset
+                                        + A_ADDRWIDTH'((k_counter + 2)
+                                                       / A_LANE_COUNT);
+                                end
+                                for (int i = 0; i < B_BANKS; i++) begin
+                                    b_addr[i] <= b_mat_base_offset
+                                        + B_ADDRWIDTH'((k_counter + 2)
+                                                       / B_BANKS);
+                                end
+                            end
                         end
                     end
                 end
@@ -467,6 +510,9 @@ module systolic_launcher #(
         end
         if (A_LANE_COUNT < 1 || B_LANE_COUNT < SYSTOLIC_WIDTH) begin
             $error("launcher does not have enough packed operand lanes");
+        end
+        if (A_LANE_COUNT != B_BANKS) begin
+            $error("GEMM K packing requires equal A lanes and B banks");
         end
     end
 

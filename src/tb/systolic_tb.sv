@@ -16,6 +16,7 @@ module systolic_tb();
     logic sig_add       = 0;
     logic sig_flow_v    = 0;
     logic sig_flow_h    = 0;
+    logic sig_clear     = 0;
     logic sig_drain     = 0;
     logic sig_broad_h   = 0;
     logic sig_broad_v   = 0;
@@ -36,6 +37,7 @@ module systolic_tb();
         .add(sig_add),
         .flow_v(sig_flow_v),
         .flow_h(sig_flow_h),
+        .clear_accumulator(sig_clear),
         .drain(sig_drain),
         .broad_h(sig_broad_h),
         .broad_v(sig_broad_v)
