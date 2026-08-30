@@ -11,27 +11,25 @@ module systolic#(
     input logic [UNIT_WIDTH-1:0] horizontal_bar[WIDTH],
 
     output logic [UNIT_WIDTH-1:0] horizontal_drain_bar[WIDTH],
+    output logic [ACCUMULATOR_WIDTH-1:0] horizontal_drain_full[WIDTH],
     input logic [3:0] result_saturation,
 
     (* max_fanout = 16, maxfan = 16 *) input logic add,
     (* max_fanout = 16, maxfan = 16 *) input logic flow_v,
     (* max_fanout = 16, maxfan = 16 *) input logic flow_h,
+    input logic clear_accumulator,
     input logic drain,      // <- Drain Result Signal
 
     input logic broad_v,     // <- Broadcast Vertical Activations
     input logic broad_h     // <- Broadcast Horizontal Activations
 );
-    // Both Intel and Xilinx attributes are present; each tool ignores the
-    // attribute it does not own. Keeping the multiply result explicit makes
-    // the 8x8 multiplier visible to DSP inference instead of burying it in a
-    // large procedural array expression.
     (* use_dsp = "yes" *)
     logic [ACCUMULATOR_WIDTH-1:0] result[WIDTH][HEIGHT];
     (* multstyle = "dsp", use_dsp = "yes" *)
     logic [(2*UNIT_WIDTH)-1:0] product[WIDTH][HEIGHT];
 
-    logic [UNIT_WIDTH-1:0] horizontal_flow[WIDTH][HEIGHT]; // x ++
-    logic [UNIT_WIDTH-1:0] vertical_flow[WIDTH][HEIGHT]; // y ++
+    logic [UNIT_WIDTH-1:0] horizontal_flow[WIDTH][HEIGHT];
+    logic [UNIT_WIDTH-1:0] vertical_flow[WIDTH][HEIGHT];
 
     generate
         for (genvar product_x = 0; product_x < WIDTH; product_x++) begin : products_x
@@ -43,13 +41,12 @@ module systolic#(
         end
     endgenerate
 
-    // A synchronous clear is compatible with DSP accumulator registers on the
-    // common FPGA families. The surrounding core already holds reset across
-    // clock edges, so this does not change its reset protocol.
+    // Synchronous clear allows the MAC registers to pack into FPGA DSP blocks.
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             for (int i=0; i<WIDTH; i++) begin
                 horizontal_drain_bar[i] <= 0;
+                horizontal_drain_full[i] <= 0;
                 for (int j=0; j<HEIGHT; j++) begin
                     result[i][j] <= 0;
                     horizontal_flow[i][j] <= 0;
@@ -58,11 +55,20 @@ module systolic#(
             end
         end else begin
 
-            if (drain) begin
+            if (clear_accumulator) begin
+                for (int i=0; i<WIDTH; i++) begin
+                    horizontal_drain_bar[i] <= 0;
+                    horizontal_drain_full[i] <= 0;
+                    for (int j=0; j<HEIGHT; j++) begin
+                        result[i][j] <= 0;
+                    end
+                end
+            end else if (drain) begin
                 for (int i=0; i<WIDTH; i++) begin
                     result[i][0] <= 0;
                     horizontal_drain_bar[i] <= UNIT_WIDTH'(
                         result[i][HEIGHT-1] >> result_saturation);
+                    horizontal_drain_full[i] <= result[i][HEIGHT-1] >> result_saturation;
 
                     for (int j=1; j<HEIGHT; j++) begin
                         result[i][j] <= result[i][j-1];

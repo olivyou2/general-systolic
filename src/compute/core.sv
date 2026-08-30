@@ -28,6 +28,12 @@
 //   0xf000_0064 : CNN padding top/bottom (low/high 8 bits)
 //   0xf000_0068 : CNN output tile origin x/y (low/high 16 bits)
 //   0xf000_006c : CNN output width
+//   0xf000_0070 : post-op control (bit 0 bias enable, bit 1 ReLU enable)
+//   0xf000_0078 : eight signed INT8 output-column biases, packed little-endian
+//   0xf000_0080 : GEMM M size (1..8)
+//   0xf000_0084 : GEMM N size (1..8)
+//   0xf000_0088 : GEMM K size (1..4096, subject to A/B base offsets)
+//   0xf000_008c : GEMM control (bit 0 clear accumulator, bit 1 final/drain)
 //   0xf000_0000 : command, data[3:0] == 3 starts an im2col CNN tile
 //
 // A, B and C each consist of eight BRAM banks.  A and B are read by the
@@ -58,6 +64,7 @@ module core #(
 
     localparam int BANK_SEL_WIDTH = (BANKS > 1) ? $clog2(BANKS) : 1;
     localparam int PACKET_WIDTH   = DATA_WIDTH + 32;
+    localparam int GEMM_PACKED_LANES = DATA_WIDTH / SYSTOLIC_UNITWIDTH;
 
     localparam logic [31:0] COMMAND_ADDR   = 32'hf000_0000;
     localparam logic [31:0] A_BASE_REG     = 32'hf000_0010;
@@ -80,6 +87,12 @@ module core #(
     localparam logic [31:0] CNN_PAD_Y_REG = 32'hf000_0064;
     localparam logic [31:0] CNN_OUTPUT_ORIGIN_REG = 32'hf000_0068;
     localparam logic [31:0] CNN_OUTPUT_WIDTH_REG = 32'hf000_006c;
+    localparam logic [31:0] POST_OP_CONTROL_REG = 32'hf000_0070;
+    localparam logic [31:0] POST_OP_BIAS_REG = 32'hf000_0078;
+    localparam logic [31:0] GEMM_M_REG = 32'hf000_0080;
+    localparam logic [31:0] GEMM_N_REG = 32'hf000_0084;
+    localparam logic [31:0] GEMM_K_REG = 32'hf000_0088;
+    localparam logic [31:0] GEMM_CONTROL_REG = 32'hf000_008c;
     localparam logic [3:0]  DMA_MODE       = 4'd1;
     localparam logic [ADDR_WIDTH:0] DEFAULT_DMA_LENGTH
         = (ADDR_WIDTH + 1)'(SYSTOLIC_HEIGHT);
@@ -112,6 +125,14 @@ module core #(
     logic [15:0] cnn_output_x;
     logic [15:0] cnn_output_y;
     logic [15:0] cnn_output_width;
+    logic post_bias_enable;
+    logic post_relu_enable;
+    logic [63:0] post_bias_data;
+    logic [15:0] gemm_m_size;
+    logic [15:0] gemm_n_size;
+    logic [15:0] gemm_k_size;
+    logic gemm_clear_accumulator;
+    logic gemm_finalize;
     logic [15:0] cnn_k_product;
     logic [15:0] cnn_k_total;
     assign cnn_k_product = cnn_kernel_width * cnn_kernel_height
@@ -177,12 +198,33 @@ module core #(
     // completely drained.  All ordinary writes/configuration packets can be
     // consumed while the array is running.
     logic launcher_busy;
+    logic launcher_busy_d;
     logic drain_active;
     logic dma_busy;
+    logic gemm_config_valid;
+    logic [16:0] gemm_a_words_required;
+    logic [16:0] gemm_b_words_required;
+    assign gemm_a_words_required
+        = 17'(({1'b0, gemm_k_size} + 17'(GEMM_PACKED_LANES - 1))
+              / GEMM_PACKED_LANES);
+    assign gemm_b_words_required
+        = 17'(({1'b0, gemm_k_size} + 17'(BANKS - 1)) / BANKS);
+    assign gemm_config_valid = (gemm_m_size != 0)
+        && (gemm_m_size <= 16'(SYSTOLIC_HEIGHT))
+        && (gemm_n_size != 0)
+        && (gemm_n_size <= 16'(SYSTOLIC_WIDTH))
+        && (gemm_k_size != 0)
+        && (gemm_a_words_required
+            <= (17'(1 << ADDR_WIDTH) - 17'(a_mat_base_offset)))
+        && (gemm_b_words_required
+            <= (17'(1 << ADDR_WIDTH) - 17'(b_mat_base_offset)));
     assign packet_accept = ingress_valid_out
-        && (!packet_is_launch || (!launcher_busy && !drain_active && !dma_busy))
-        && (!packet_is_dma_start || (!launcher_busy && !drain_active && !dma_busy))
-        && (!packet_is_cnn || (!launcher_busy && !drain_active && !dma_busy
+        && (!packet_is_launch || (!launcher_busy && !launcher_busy_d
+                                  && !drain_active && !dma_busy))
+        && (!packet_is_dma_start || (!launcher_busy && !launcher_busy_d
+                                     && !drain_active && !dma_busy))
+        && (!packet_is_cnn || (!launcher_busy && !launcher_busy_d
+                               && !drain_active && !dma_busy
                                && (cnn_k_total != 0)))
         && (!packet_is_c_write || !drain_active)
         && (!(packet_is_a_write || packet_is_b_write || packet_is_c_write) || !dma_busy);
@@ -190,7 +232,8 @@ module core #(
     assign ingress_pop = packet_accept;
 
     logic launcher_fire;
-    assign launcher_fire = ingress_pop && packet_is_launch;
+    assign launcher_fire = ingress_pop && packet_is_launch
+        && gemm_config_valid;
     logic dma_request;
     assign dma_request = ingress_pop && packet_is_dma_start;
     logic cnn_fire;
@@ -223,6 +266,14 @@ module core #(
             cnn_output_x <= '0;
             cnn_output_y <= '0;
             cnn_output_width <= '0;
+            post_bias_enable <= 1'b0;
+            post_relu_enable <= 1'b0;
+            post_bias_data <= '0;
+            gemm_m_size <= 16'(SYSTOLIC_HEIGHT);
+            gemm_n_size <= 16'(SYSTOLIC_WIDTH);
+            gemm_k_size <= 16'(SYSTOLIC_WIDTH);
+            gemm_clear_accumulator <= 1'b1;
+            gemm_finalize <= 1'b1;
         end else if (ingress_pop) begin
             if (packet_addr == A_BASE_REG) begin
                 a_mat_base_offset <= packet_data[ADDR_WIDTH-1:0];
@@ -270,6 +321,20 @@ module core #(
                 cnn_output_y <= packet_data[31:16];
             end else if (packet_addr == CNN_OUTPUT_WIDTH_REG) begin
                 cnn_output_width <= packet_data[15:0];
+            end else if (packet_addr == POST_OP_CONTROL_REG) begin
+                post_bias_enable <= packet_data[0];
+                post_relu_enable <= packet_data[1];
+            end else if (packet_addr == POST_OP_BIAS_REG) begin
+                post_bias_data <= packet_data[63:0];
+            end else if (packet_addr == GEMM_M_REG) begin
+                gemm_m_size <= packet_data[15:0];
+            end else if (packet_addr == GEMM_N_REG) begin
+                gemm_n_size <= packet_data[15:0];
+            end else if (packet_addr == GEMM_K_REG) begin
+                gemm_k_size <= packet_data[15:0];
+            end else if (packet_addr == GEMM_CONTROL_REG) begin
+                gemm_clear_accumulator <= packet_data[0];
+                gemm_finalize <= packet_data[1];
             end
         end
     end
@@ -287,6 +352,10 @@ module core #(
     logic [DATA_WIDTH-1:0] c_write_data [0:BANKS-1];
     logic                  drain_request_valid;
     logic                  drain_capture_valid;
+    logic                  drain_row_enabled;
+    logic [3:0]            drain_logical_row;
+    logic [15:0]           active_m_size;
+    logic [15:0]           active_n_size;
     logic [ADDR_WIDTH-1:0] c_read_addr;
     logic                  dma_a_write_enable;
     logic                  dma_b_write_enable;
@@ -301,6 +370,9 @@ module core #(
     assign a_write_enable = ingress_pop && packet_is_a_write;
     assign b_write_enable = ingress_pop && packet_is_b_write;
     assign c_host_write_enable = ingress_pop && packet_is_c_write && !drain_active;
+    assign drain_logical_row = 4'(SYSTOLIC_HEIGHT - 1)
+        - drain_step_index;
+    assign drain_row_enabled = (16'(drain_logical_row) < active_m_size);
 
     generate
         genvar bank;
@@ -344,7 +416,9 @@ module core #(
                 .addr_in (c_host_write_enable ? packet_word_addr : c_write_addr),
                 .data_in (c_host_write_enable ? packet_data : c_write_data[bank]),
                 .we      ((c_host_write_enable && (packet_bank == bank))
-                          || drain_capture_valid),
+                          || (drain_capture_valid
+                              && drain_row_enabled
+                              && (16'(bank) < active_n_size))),
                 .addr_out(c_read_addr),
                 .data_out(c_data_out[bank])
             );
@@ -381,6 +455,7 @@ module core #(
     logic [SYSTOLIC_UNITWIDTH-1:0] systolic_vertical_bar [0:SYSTOLIC_HEIGHT-1];
     logic [SYSTOLIC_UNITWIDTH-1:0] systolic_horizontal_bar [0:SYSTOLIC_WIDTH-1];
     logic [SYSTOLIC_UNITWIDTH-1:0] systolic_drain_bar [0:SYSTOLIC_WIDTH-1];
+    logic [15:0] systolic_drain_full [0:SYSTOLIC_WIDTH-1];
     logic systolic_add_signal;
     logic systolic_flow_v_signal;
     logic systolic_flow_h_signal;
@@ -409,6 +484,9 @@ module core #(
         .fire                     (launcher_fire),
         .cnn_fire                 (cnn_fire),
         .busy                     (launcher_busy),
+        .gemm_m_size              (gemm_m_size),
+        .gemm_n_size              (gemm_n_size),
+        .gemm_k_size              (gemm_k_size),
         .cnn_input_base           (cnn_input_base),
         .cnn_weight_base          (cnn_weight_base),
         .cnn_input_width          (cnn_input_width),
@@ -436,6 +514,9 @@ module core #(
     );
 
     logic systolic_drain_signal;
+    logic systolic_clear_signal;
+    assign systolic_clear_signal = (launcher_fire && gemm_clear_accumulator)
+        || cnn_fire;
     systolic #(
         .WIDTH (SYSTOLIC_WIDTH),
         .HEIGHT(SYSTOLIC_HEIGHT),
@@ -446,18 +527,20 @@ module core #(
         .vertical_bar         (systolic_vertical_bar),
         .horizontal_bar       (systolic_horizontal_bar),
         .horizontal_drain_bar (systolic_drain_bar),
+        .horizontal_drain_full(systolic_drain_full),
         .result_saturation    (4'd0),
         .add                  (systolic_add_signal),
         .flow_v               (systolic_flow_v_signal),
         .flow_h               (systolic_flow_h_signal),
+        .clear_accumulator    (systolic_clear_signal),
         .drain                (systolic_drain_signal),
         .broad_v              (systolic_broad_v_signal),
         .broad_h              (systolic_broad_h_signal)
     );
 
-    logic launcher_busy_d;
     logic [3:0] drain_step_index;
     logic drain_pending;
+    logic launch_finalize_q;
 
     // systolic publishes a drained value one clock after drain is asserted.
     // C is always available, so drain does not depend on dev_data_out_ready.
@@ -470,12 +553,32 @@ module core #(
     assign c_write_addr = c_mat_base_offset
         + ADDR_WIDTH'(SYSTOLIC_HEIGHT - 1 - drain_step_index);
 
+    function automatic logic [7:0] apply_post_ops(
+        input logic [15:0] accumulator,
+        input logic [7:0] bias
+    );
+        logic signed [16:0] adjusted;
+        begin
+            adjusted = $signed({1'b0, accumulator});
+            if (post_bias_enable) begin
+                adjusted = adjusted + $signed({{9{bias[7]}}, bias});
+            end
+
+            if (post_relu_enable && (adjusted < 0)) begin
+                apply_post_ops = 8'd0;
+            end else begin
+                apply_post_ops = adjusted[7:0];
+            end
+        end
+    endfunction
+
     always_comb begin
         for (int i = 0; i < BANKS; i++) begin
             c_write_data[i] = '0;
             if (i < SYSTOLIC_WIDTH) begin
                 c_write_data[i][SYSTOLIC_UNITWIDTH-1:0]
-                    = systolic_drain_bar[i];
+                    = apply_post_ops(systolic_drain_full[i],
+                                     post_bias_data[i * 8 +: 8]);
             end
         end
     end
@@ -486,11 +589,25 @@ module core #(
             drain_active <= 1'b0;
             drain_step_index <= '0;
             drain_pending <= 1'b0;
+            launch_finalize_q <= 1'b1;
+            active_m_size <= 16'(SYSTOLIC_HEIGHT);
+            active_n_size <= 16'(SYSTOLIC_WIDTH);
         end else begin
             launcher_busy_d <= launcher_busy;
 
+            if (launcher_fire) begin
+                launch_finalize_q <= gemm_finalize;
+                active_m_size <= gemm_m_size;
+                active_n_size <= gemm_n_size;
+            end else if (cnn_fire) begin
+                launch_finalize_q <= 1'b1;
+                active_m_size <= 16'(SYSTOLIC_HEIGHT);
+                active_n_size <= 16'(SYSTOLIC_WIDTH);
+            end
+
             if (!drain_active) begin
-                if (launcher_busy_d && !launcher_busy) begin
+                if (launcher_busy_d && !launcher_busy
+                    && launch_finalize_q) begin
                     drain_active <= 1'b1;
                     drain_step_index <= '0;
                     drain_pending <= 1'b0;
@@ -508,7 +625,7 @@ module core #(
                 if (drain_request_valid) begin
                     drain_pending <= 1'b1;
                 end
-            end
+            end 
         end
     end
 
