@@ -4,7 +4,9 @@
 //   simulator --binary --timing -I./src \
 //     --top-module core_command_tb \
 //     src/fifo/fifo.sv src/bram_sim/bram.sv src/compute/dma.sv \
-//     src/compute/launcher.sv src/compute/systolic.sv src/compute/core.sv \
+//     src/compute/window/window_generator.sv \
+//     src/compute/window/window_loop.sv src/compute/launcher.sv \
+//     src/compute/systolic.sv src/compute/core.sv \
 //     src/tb/core_command_tb.sv
 //   ./obj_dir/Vcore_command_tb +CMD_FILE=src/tb/commands/core_cnn_smoke.cmd
 //

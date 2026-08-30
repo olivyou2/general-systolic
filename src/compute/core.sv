@@ -438,7 +438,8 @@ module core #(
     logic systolic_drain_signal;
     systolic #(
         .WIDTH (SYSTOLIC_WIDTH),
-        .HEIGHT(SYSTOLIC_HEIGHT)
+        .HEIGHT(SYSTOLIC_HEIGHT),
+        .UNIT_WIDTH(SYSTOLIC_UNITWIDTH)
     ) array (
         .clk                  (clk),
         .rst_n                (rst_n),
